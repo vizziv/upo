@@ -2,10 +2,10 @@ open Bootstrap3
 
 type t1 (full :: {Type}) (p :: (Type * {Type} * {Type} * {{Unit}} * Type * Type * Type)) =
      {Title : string,
-      Extra : xbody,
+      Extra : transaction xbody,
       Table : sql_table p.2 p.4,
       Insert : $p.2 -> p.7 -> transaction unit,
-      Update : $p.2 -> p.7 -> transaction unit,
+      Update : p.1 -> $p.2 -> p.7 -> transaction unit,
       Delete : p.1 -> transaction unit,
       List : sql_exp [Tab = p.2] [] [] bool -> transaction (list p.1),
       KeyIs : nm :: Name -> p.1 -> sql_exp [nm = p.2] [] [] bool,
@@ -16,8 +16,9 @@ type t1 (full :: {Type}) (p :: (Type * {Type} * {Type} * {{Unit}} * Type * Type 
       FreshWidgets : transaction p.6,
       WidgetsFrom : $p.2 -> p.7 -> transaction p.6,
       RenderWidgets : p.5 -> p.6 -> xbody,
-      ReadWidgets : p.6 -> signal ($p.3 * p.7),
-      KeyOf : $p.2 -> p.1}
+      ReadWidgets : p.6 -> signal ($p.3 * p.7 * option string (* Error message, if something is amiss *)),
+      KeyOf : $p.2 -> p.1,
+      ForIndex : transaction (list (p.1 * xbody))}
 
 type t (full :: {Type}) (tables :: {(Type * {Type} * {Type} * {{Unit}} * Type * Type * Type)}) =
     $(map (t1 full) tables)
@@ -28,18 +29,23 @@ type base3 = unit
 
 val none [full ::: {Type}] = {}
 
+datatype index_style exp row =
+         Default of exp
+       | Custom of transaction (list row)
+
 fun one [full ::: {Type}]
         [tname :: Name] [key :: Name] [keyT ::: Type] [rest ::: {Type}] [cstrs ::: {{Unit}}]
         [old ::: {(Type * {Type} * {Type} * {{Unit}} * Type * Type * Type)}]
         [[key] ~ rest] [[tname] ~ old]
-        (tab : sql_table ([key = keyT] ++ rest) cstrs) (title : string) (extra : xbody)
+        (tab : sql_table ([key = keyT] ++ rest) cstrs) (title : string) (extra : transaction xbody)
+        (isty : index_style (sql_exp [Tab = [key = keyT] ++ rest] [] [] bool) (keyT * xbody))
         (sh : show keyT) (inj : sql_injectable keyT) (injs : $(map sql_injectable rest))
         (fl : folder rest) (ofl : folder old) (old : t full old) =
     {tname = {Title = title,
               Extra = extra,
               Table = tab,
               Insert = fn r () => @@Sql.easy_insert [[key = _] ++ rest] [_] ({key = inj} ++ injs) (@Folder.cons [_] [_] ! fl) tab r,
-              Update = fn r () => @@Sql.easy_update [[key = _]] [rest] [_] ! {key = inj} injs _ fl tab (r --- rest) (r -- key),
+              Update = fn k r () => @@Sql.easy_update' [[key = _]] [rest] [_] ! {key = inj} injs _ fl tab {key = k} r (WHERE TRUE),
               Delete = fn _ => return (),
               List = fn wher => List.mapQuery (SELECT tab.{key}
                                                FROM tab
@@ -54,14 +60,22 @@ fun one [full ::: {Type}]
               FreshWidgets = return (),
               WidgetsFrom = fn _ _ => return (),
               RenderWidgets = fn () () => <xml></xml>,
-              ReadWidgets = fn () => return ((), ()),
-              KeyOf = fn r => r.key}} ++ old
+              ReadWidgets = fn () => return ((), (), None),
+              KeyOf = fn r => r.key,
+              ForIndex = case isty of
+                             Default fltr => List.mapQuery (SELECT tab.{key}
+                                                            FROM tab
+                                                            WHERE {fltr}
+                                                            ORDER BY tab.{key})
+                                                           (fn {Tab = r} => (r.key, txt r.key))
+                           | Custom xa => xa}} ++ old
 
 fun two [full ::: {Type}]
         [tname :: Name] [key1 :: Name] [key2 :: Name] [keyT1 ::: Type] [keyT2 ::: Type]
         [rest ::: {Type}] [cstrs ::: {{Unit}}] [old ::: {(Type * {Type} * {Type} * {{Unit}} * Type * Type * Type)}]
         [[key1] ~ [key2]] [[key1, key2] ~ rest] [[tname] ~ old]
-        (tab: sql_table ([key1 = keyT1, key2 = keyT2] ++ rest) cstrs) (title : string) (extra : xbody)
+        (tab: sql_table ([key1 = keyT1, key2 = keyT2] ++ rest) cstrs) (title : string) (extra : transaction xbody)
+        (isty : index_style (sql_exp [Tab = [key1 = keyT1, key2 = keyT2] ++ rest] [] [] bool) (keyT1 * keyT2 * xbody))
         (sh : show (keyT1 * keyT2)) (inj1 : sql_injectable keyT1) (inj2 : sql_injectable keyT2)
         (injs : $(map sql_injectable rest)) (fl : folder rest) (ofl : folder old)
         (old : t full old) =
@@ -69,7 +83,7 @@ fun two [full ::: {Type}]
               Extra = extra,
               Table = tab,
               Insert = fn r () => @@Sql.easy_insert [[key1 = _, key2 = _] ++ rest] [_] ({key1 = inj1, key2 = inj2} ++ injs) (@Folder.cons [_] [_] ! (@Folder.cons [_] [_] ! fl)) tab r,
-              Update = fn r () => @@Sql.easy_update [[key1 = _, key2 = _]] [rest] [_] ! {key1 = inj1, key2 = inj2} injs _ fl tab (r --- rest) (r -- key1 -- key2),
+              Update = fn (k1, k2) r () => @@Sql.easy_update' [[key1 = _, key2 = _]] [rest] [_] ! {key1 = inj1, key2 = inj2} injs _ fl tab {key1 = k1, key2 = k2} r (WHERE TRUE),
               Delete = fn _ => return (),
               List = fn wher => List.mapQuery (SELECT tab.{key1}, tab.{key2}
                                                FROM tab
@@ -85,8 +99,17 @@ fun two [full ::: {Type}]
               FreshWidgets = return (),
               WidgetsFrom = fn _ _ => return (),
               RenderWidgets = fn () () => <xml></xml>,
-              ReadWidgets = fn () => return ((), ()),
-              KeyOf = fn r => (r.key1, r.key2)}} ++ old
+              ReadWidgets = fn () => return ((), (), None),
+              KeyOf = fn r => (r.key1, r.key2),
+              ForIndex = case isty of
+                             Default fltr => List.mapQuery (SELECT tab.{key1}, tab.{key2}
+                                                            FROM tab
+                                                            WHERE {fltr}
+                                                            ORDER BY tab.{key1}, tab.{key2})
+                                                           (fn {Tab = r} => ((r.key1, r.key2), txt (r.key1, r.key2)))
+                           | Custom xa =>
+                             ls <- xa;
+                             return (List.mp (fn (k1, k2, b) => ((k1, k2), b)) ls)}} ++ old
 
 type text1 t = t
 type text2 t = source string * t
@@ -128,8 +151,8 @@ fun text [full ::: {Type}]
                                                </xml>,
                             ReadWidgets = fn (s, ws) =>
                                              v <- signal s;
-                                             (wsv, aux) <- old.tname.ReadWidgets ws;
-                                             return ({col = readError v} ++ wsv, aux)}}
+                                             (wsv, aux, err) <- old.tname.ReadWidgets ws;
+                                             return ({col = readError v} ++ wsv, aux, err)}}
 
 fun hyperref [full ::: {Type}]
              [tname :: Name] [key ::: Type] [col :: Name] [colT ::: Type]
@@ -169,8 +192,49 @@ fun hyperref [full ::: {Type}]
                                                </xml>,
                             ReadWidgets = fn (s, ws) =>
                                              v <- signal s;
-                                             (wsv, aux) <- old.tname.ReadWidgets ws;
-                                             return ({col = readError v} ++ wsv, aux)}}
+                                             (wsv, aux, err) <- old.tname.ReadWidgets ws;
+                                             return ({col = readError v} ++ wsv, aux, err)}}
+
+fun image [full ::: {Type}]
+          [tname :: Name] [key ::: Type] [col :: Name] [colT ::: Type]
+          [cols ::: {Type}] [colsDone ::: {Type}] [cstrs ::: {{Unit}}]
+          [impl1 ::: Type] [impl2 ::: Type] [impl3 ::: Type] [old ::: {(Type * {Type} * {Type} * {{Unit}} * Type * Type * Type)}]
+          [[col] ~ cols] [[col] ~ colsDone] [[tname] ~ old]
+          (lab : string) (_ : show colT) (_ : read colT) (cls : css_class)
+          (old : t full ([tname = (key, [col = colT] ++ cols, colsDone, cstrs, impl1, impl2, impl3)] ++ old)) =
+    old -- tname
+        ++ {tname = old.tname
+                        -- #Render -- #FreshWidgets -- #WidgetsFrom -- #RenderWidgets -- #ReadWidgets
+                        ++ {Render = fn entry aux r =>
+                                        <xml>
+                                          {old.tname.Render entry aux r}
+                                          {case checkUrl (show r.col) of
+                                               None => <xml></xml>
+                                             | Some url => <xml><tr>
+                                               <th>{[lab]}</th>
+                                               <td><img src={url} class={cls}/></td>
+                                             </tr></xml>}
+                                        </xml>,
+                            FreshWidgets =
+                               s <- source "";
+                               ws <- old.tname.FreshWidgets;
+                               return (s, ws),
+                            WidgetsFrom = fn r aux =>
+                               s <- source (show r.col);
+                               ws <- old.tname.WidgetsFrom r aux;
+                               return (s, ws),
+                            RenderWidgets = fn cfg (s, ws) =>
+                                               <xml>
+                                                 {old.tname.RenderWidgets cfg ws}
+                                                 <div class="form-group">
+                                                   <label class="control-label">{[lab]}</label>
+                                                   <ctextbox class="form-control" source={s}/>
+                                                 </div>
+                                               </xml>,
+                            ReadWidgets = fn (s, ws) =>
+                                             v <- signal s;
+                                             (wsv, aux, err) <- old.tname.ReadWidgets ws;
+                                             return ({col = readError v} ++ wsv, aux, err)}}
 
 fun textOpt [full ::: {Type}]
             [tname :: Name] [key ::: Type] [col :: Name] [colT ::: Type]
@@ -208,10 +272,10 @@ fun textOpt [full ::: {Type}]
                                                </xml>,
                             ReadWidgets = fn (s, ws) =>
                                              v <- signal s;
-                                             (wsv, aux) <- old.tname.ReadWidgets ws;
+                                             (wsv, aux, err) <- old.tname.ReadWidgets ws;
                                              return ({col = case v of
                                                                 "" => None
-                                                              | _ => Some (readError v)} ++ wsv, aux)}}
+                                                              | _ => Some (readError v)} ++ wsv, aux, err)}}
 
 type checkbox1 t = t
 type checkbox2 t = source bool * t
@@ -253,8 +317,8 @@ fun checkbox [full ::: {Type}]
                                                </xml>,
                             ReadWidgets = fn (s, ws) =>
                                              v <- signal s;
-                                             (wsv, aux) <- old.tname.ReadWidgets ws;
-                                             return ({col = v} ++ wsv, aux)}}
+                                             (wsv, aux, err) <- old.tname.ReadWidgets ws;
+                                             return ({col = v} ++ wsv, aux, err)}}
 
 type htmlbox1 t = t
 type htmlbox2 t = Widget.htmlbox * t
@@ -296,8 +360,8 @@ fun htmlbox [full ::: {Type}]
                                                   </xml>,
                                ReadWidgets = fn (s, ws) =>
                                                 v <- @Widget.value Widget.htmlbox s;
-                                                (wsv, aux) <- old.tname.ReadWidgets ws;
-                                                return ({col = v} ++ wsv, aux)}}
+                                                (wsv, aux, err) <- old.tname.ReadWidgets ws;
+                                                return ({col = v} ++ wsv, aux, err)}}
 
 type foreign1 t key colT = list colT * t
 type foreign2 t key colT = source string * t
@@ -360,12 +424,12 @@ fun foreign [full ::: {Type}]
                                                </xml>,
                             ReadWidgets = fn (s, ws) =>
                                              v <- signal s;
-                                             (wsv, aux) <- old.tname.ReadWidgets ws;
-                                             return ({col = readError v} ++ wsv, aux)},
+                                             (wsv, aux, err) <- old.tname.ReadWidgets ws;
+                                             return ({col = readError v} ++ wsv, aux, err)},
            ftname = old.ftname
                         -- #Insert -- #Update -- #Auxiliary -- #Render -- #ReadWidgets -- #WidgetsFrom
                         ++ {Insert = fn r (_, aux) => old.ftname.Insert r aux,
-                            Update = fn r (_, aux) => old.ftname.Update r aux,
+                            Update = fn k r (_, aux) => old.ftname.Update k r aux,
                             Auxiliary = fn fkey row =>
                                            let
                                                val tab = old.tname.Table
@@ -387,15 +451,15 @@ fun foreign [full ::: {Type}]
                                            </xml>
                                        end,
                             ReadWidgets = fn w =>
-                                             (v, aux) <- old.ftname.ReadWidgets w;
-                                             return (v, ([], aux)),
+                                             (v, aux, err) <- old.ftname.ReadWidgets w;
+                                             return (v, ([], aux), err),
                             WidgetsFrom = fn r (_, aux) => old.ftname.WidgetsFrom r aux}}
 
 type manyToMany11 t key1 key2 = list key2 * t
-type manyToMany12 t key1 key2 = source string * source (list key2) * t
+type manyToMany12 t key1 key2 = source string * source (list key2) * source bool (* dropdown changed since last button push? *) * t
 type manyToMany13 t key1 key2 = list key2 * t
 type manyToMany21 t key1 key2 = list key1 * t
-type manyToMany22 t key1 key2 = source string * source (list key1) * t
+type manyToMany22 t key1 key2 = source string * source (list key1) * source bool * t
 type manyToMany23 t key1 key2 = list key1 * t
 
 fun manyToMany [full ::: {Type}] [tname1 :: Name] [key1 ::: Type] [col1 :: Name]
@@ -424,8 +488,8 @@ fun manyToMany [full ::: {Type}] [tname1 :: Name] [key1 ::: Type] [col1 :: Name]
                                 List.app (fn k2 => dml (INSERT INTO rel({col1}, {col2})
                                                         VALUES ({[r.col1]}, {[k2]}))) k2s,
                              Update =
-                             fn r (k2s, aux) =>
-                                old.tname1.Update r aux;
+                             fn k r (k2s, aux) =>
+                                old.tname1.Update k r aux;
                                 dml (DELETE FROM rel
                                      WHERE t.{col1} = {[r.col1]});
                                 List.app (fn k2 => dml (INSERT INTO rel({col1}, {col2})
@@ -461,32 +525,40 @@ fun manyToMany [full ::: {Type}] [tname1 :: Name] [key1 ::: Type] [col1 :: Name]
                              FreshWidgets =
                                 s <- source "";
                                 sl <- source [];
+                                changed <- source False;
                                 ws <- old.tname1.FreshWidgets;
-                                return (s, sl, ws),
+                                return (s, sl, changed, ws),
                              WidgetsFrom = fn r (keys, aux) =>
                                  s <- source "";
                                  sl <- source keys;
+                                 changed <- source False;
                                  ws <- old.tname1.WidgetsFrom r aux;
-                                 return (s, sl, ws),
-                             RenderWidgets = fn (cfg1, cfg2) (s, sl, ws) =>
+                                 return (s, sl, changed, ws),
+                             RenderWidgets = fn (cfg1, cfg2) (s, sl, changed, ws) =>
                                                 <xml>
                                                   {old.tname1.RenderWidgets cfg2 ws}
                                                   <div class="form-group">
                                                     <label class="control-label">{[lab1]}</label>
                                                     <div class="input-group">
-                                                      <cselect class="form-control" source={s}>
-                                                        {List.mapX (fn s => <xml><coption>{[s]}</coption></xml>) cfg1}
-                                                      </cselect> <span class="input-group-btn">
+                                                      <span class="input-group-btn">
                                                         <button class="btn"
                                                                 onclick={fn _ =>
                                                                             sv <- get s;
-                                                                            sv <- return (readError sv);
-                                                                            slv <- get sl;
-                                                                            if List.mem sv slv then
+                                                                            if sv = "" then
                                                                                 return ()
                                                                             else
-                                                                                set sl (List.sort gt (sv :: slv))}>Add</button>
+                                                                                set changed False;
+                                                                                sv <- return (readError sv);
+                                                                                slv <- get sl;
+                                                                                if List.mem sv slv then
+                                                                                    return ()
+                                                                                else
+                                                                                    set sl (List.sort gt (sv :: slv))}>Select:</button>
                                                       </span>
+                                                      <cselect class="form-control" source={s} onchange={set changed True}>
+                                                        <coption/>
+                                                        {List.mapX (fn s => <xml><coption>{[s]}</coption></xml>) cfg1}
+                                                      </cselect> 
                                                     </div>
                                                     <table>
                                                       <dyn signal={slv <- signal sl;
@@ -498,17 +570,27 @@ fun manyToMany [full ::: {Type}] [tname1 :: Name] [key1 ::: Type] [col1 :: Name]
                                                     </table>
                                                 </div>
                                               </xml>,
-                           ReadWidgets = fn (s, sl, ws) =>
+                           ReadWidgets = fn (s, sl, changed, ws) =>
                                             slv <- signal sl;
-                                            (wsv, aux) <- old.tname1.ReadWidgets ws;
-                                            return (wsv, (slv, aux))},
+                                            chd <- signal changed;
+                                            (wsv, aux, err) <- old.tname1.ReadWidgets ws;
+                                            return (wsv, (slv, aux), if chd then
+                                                                         let
+                                                                             val msg = "The dropdown for \"" ^ lab1 ^ "\" has changed, but the new value hasn't been selected by pushing the adjacent button."
+                                                                         in
+                                                                             case err of
+                                                                                 None => Some msg
+                                                                               | Some err => Some (err ^ "\n" ^ msg)
+                                                                         end
+                                                                     else
+                                                                         err)},
           tname2 = old.tname2
                        -- #Insert -- #Update -- #Delete -- #Config -- #Auxiliary -- #Render -- #FreshWidgets -- #WidgetsFrom -- #RenderWidgets -- #ReadWidgets
                        ++ {Insert = fn r (k1s, aux) =>                         old.tname2.Insert r aux;
                            List.app (fn k1 => dml (INSERT INTO rel({col1}, {col2})
                                                    VALUES ({[k1]}, {[r.col2]}))) k1s,
-                           Update = fn r (k1s, aux) =>
-                             old.tname2.Update r aux;
+                           Update = fn k r (k1s, aux) =>
+                             old.tname2.Update k r aux;
                              dml (DELETE FROM rel
                                   WHERE t.{col2} = {[r.col2]});
                              List.app (fn k1 => dml (INSERT INTO rel({col1}, {col2})
@@ -545,32 +627,41 @@ fun manyToMany [full ::: {Type}] [tname1 :: Name] [key1 ::: Type] [col1 :: Name]
                            FreshWidgets =
                               s <- source "";
                               sl <- source [];
+                              changed <- source False;
                               ws <- old.tname2.FreshWidgets;
-                              return (s, sl, ws),
+                              return (s, sl, changed, ws),
                            WidgetsFrom = fn r (keys, aux) =>
                                             s <- source "";
                                             sl <- source keys;
+                                            changed <- source False;
                                             ws <- old.tname2.WidgetsFrom r aux;
-                                            return (s, sl, ws),
-                           RenderWidgets = fn (cfg1, cfg2) (s, sl, ws) =>
+                                            return (s, sl, changed, ws),
+                           RenderWidgets = fn (cfg1, cfg2) (s, sl, changed, ws) =>
                                               <xml>
                                                 {old.tname2.RenderWidgets cfg2 ws}
                                                 <div class="form-group">
                                                   <label class="control-label">{[lab2]}</label>
                                                   <div class="input-group">
-                                                    <cselect class="form-control" source={s}>
-                                                      {List.mapX (fn s => <xml><coption>{[s]}</coption></xml>) cfg1}
-                                                    </cselect> <span class="input-group-btn">
+                                                    <span class="input-group-btn">
                                                       <button class="btn"
                                                               onclick={fn _ =>
                                                                           sv <- get s;
-                                                                          sv <- return (readError sv);
-                                                                          slv <- get sl;
-                                                                          if List.mem sv slv then
+                                                                          if sv = "" then
                                                                               return ()
                                                                           else
-                                                                              set sl (List.sort gt (sv :: slv))}>Add</button>
+                                                                              set changed False;
+
+                                                                              sv <- return (readError sv);
+                                                                              slv <- get sl;
+                                                                              if List.mem sv slv then
+                                                                                  return ()
+                                                                              else
+                                                                                  set sl (List.sort gt (sv :: slv))}>Select:</button>
                                                       </span>
+                                                    <cselect class="form-control" source={s} onchange={set changed True}>
+                                                      <coption/>
+                                                      {List.mapX (fn s => <xml><coption>{[s]}</coption></xml>) cfg1}
+                                                    </cselect> 
                                                   </div>
                                                   <table>
                                                     <dyn signal={slv <- signal sl;
@@ -582,10 +673,20 @@ fun manyToMany [full ::: {Type}] [tname1 :: Name] [key1 ::: Type] [col1 :: Name]
                                                   </table>
                                                 </div>
                                               </xml>,
-                             ReadWidgets = fn (s, sl, ws) =>
+                             ReadWidgets = fn (s, sl, changed, ws) =>
                                               slv <- signal sl;
-                                              (wsv, aux) <- old.tname2.ReadWidgets ws;
-                                              return (wsv, (slv, aux))}}
+                                              chd <- signal changed;
+                                              (wsv, aux, err) <- old.tname2.ReadWidgets ws;
+                                              return (wsv, (slv, aux), if chd then
+                                                                           let
+                                                                               val msg = "The dropdown for \"" ^ lab2 ^ "\" has changed, but the new value hasn't been selected by pushing the adjacent button."
+                                                                           in
+                                                                               case err of
+                                                                                   None => Some msg
+                                                                                 | Some err => Some (err ^ "\n" ^ msg)
+                                                                           end
+                                                                       else
+                                                                           err)}}
 
 fun manyToManyOrdered [full ::: {Type}] [tname1 :: Name] [key1 ::: Type] [col1 :: Name]
                       [cols1 ::: {Type}] [colsDone1 ::: {Type}] [cstrs1 ::: {{Unit}}]
@@ -613,8 +714,8 @@ fun manyToManyOrdered [full ::: {Type}] [tname1 :: Name] [key1 ::: Type] [col1 :
                                 List.appi (fn i k2 => dml (INSERT INTO rel(SeqNum, {col1}, {col2})
                                                            VALUES ({[i]}, {[r.col1]}, {[k2]}))) k2s,
                              Update =
-                             fn r (k2s, aux) =>
-                                old.tname1.Update r aux;
+                             fn k r (k2s, aux) =>
+                                old.tname1.Update k r aux;
                                 dml (DELETE FROM rel
                                      WHERE t.{col1} = {[r.col1]});
                                 List.appi (fn i k2 => dml (INSERT INTO rel(SeqNum, {col1}, {col2})
@@ -650,32 +751,40 @@ fun manyToManyOrdered [full ::: {Type}] [tname1 :: Name] [key1 ::: Type] [col1 :
                              FreshWidgets =
                                 s <- source "";
                                 sl <- source [];
+                                changed <- source False;
                                 ws <- old.tname1.FreshWidgets;
-                                return (s, sl, ws),
+                                return (s, sl, changed, ws),
                              WidgetsFrom = fn r (keys, aux) =>
                                  s <- source "";
                                  sl <- source keys;
+                                 changed <- source False;
                                  ws <- old.tname1.WidgetsFrom r aux;
-                                 return (s, sl, ws),
-                             RenderWidgets = fn (cfg1, cfg2) (s, sl, ws) =>
+                                 return (s, sl, changed, ws),
+                             RenderWidgets = fn (cfg1, cfg2) (s, sl, changed, ws) =>
                                                 <xml>
                                                   {old.tname1.RenderWidgets cfg2 ws}
                                                   <div class="form-group">
                                                     <label class="control-label">{[lab1]}</label>
                                                     <div class="input-group">
-                                                      <cselect class="form-control" source={s}>
-                                                        {List.mapX (fn s => <xml><coption>{[s]}</coption></xml>) cfg1}
-                                                      </cselect> <span class="input-group-btn">
+                                                      <span class="input-group-btn">
                                                         <button class="btn"
                                                                 onclick={fn _ =>
                                                                             sv <- get s;
-                                                                            sv <- return (readError sv);
-                                                                            slv <- get sl;
-                                                                            if List.mem sv slv then
+                                                                            if sv = "" then
                                                                                 return ()
                                                                             else
-                                                                                set sl (List.append slv (sv :: []))}>Add</button>
+                                                                                set changed False;
+                                                                                sv <- return (readError sv);
+                                                                                slv <- get sl;
+                                                                                if List.mem sv slv then
+                                                                                    return ()
+                                                                                else
+                                                                                    set sl (List.append slv (sv :: []))}>Select:</button>
                                                       </span>
+                                                      <cselect class="form-control" source={s} onchange={set changed True}>
+                                                        <coption/>
+                                                        {List.mapX (fn s => <xml><coption>{[s]}</coption></xml>) cfg1}
+                                                      </cselect> 
                                                     </div>
                                                     <table>
                                                       <dyn signal={slv <- signal sl;
@@ -714,14 +823,24 @@ fun manyToManyOrdered [full ::: {Type}] [tname1 :: Name] [key1 ::: Type] [col1 :
                                                     </table>
                                                 </div>
                                               </xml>,
-                           ReadWidgets = fn (s, sl, ws) =>
+                           ReadWidgets = fn (s, sl, changed, ws) =>
                                             slv <- signal sl;
-                                            (wsv, aux) <- old.tname1.ReadWidgets ws;
-                                            return (wsv, (slv, aux))},
+                                            chd <- signal changed;
+                                            (wsv, aux, err) <- old.tname1.ReadWidgets ws;
+                                            return (wsv, (slv, aux), if chd then
+                                                                         let
+                                                                             val msg = "The dropdown for \"" ^ lab1 ^ "\" has changed, but the new value hasn't been selected by pushing the adjacent button."
+                                                                         in
+                                                                             case err of
+                                                                                 None => Some msg
+                                                                               | Some err => Some (err ^ "\n" ^ msg)
+                                                                         end
+                                                                     else
+                                                                         err)},
           tname2 = old.tname2
                        -- #Insert -- #Update -- #Delete -- #Config -- #Auxiliary -- #Render -- #FreshWidgets -- #WidgetsFrom -- #RenderWidgets -- #ReadWidgets
                        ++ {Insert = fn r (k1s, aux) => old.tname2.Insert r aux,
-                           Update = fn r (k1s, aux) => old.tname2.Update r aux,
+                           Update = fn k r (k1s, aux) => old.tname2.Update k r aux,
                            Delete = fn k2 => dml (DELETE FROM rel WHERE t.{col2} = {[k2]}),
                            Config =
                            let
@@ -753,18 +872,20 @@ fun manyToManyOrdered [full ::: {Type}] [tname1 :: Name] [key1 ::: Type] [col1 :
                            FreshWidgets =
                               s <- source "";
                               sl <- source [];
+                              changed <- source False;
                               ws <- old.tname2.FreshWidgets;
-                              return (s, sl, ws),
+                              return (s, sl, changed, ws),
                            WidgetsFrom = fn r (keys, aux) =>
                                             s <- source "";
                                             sl <- source keys;
+                                            changed <- source False;
                                             ws <- old.tname2.WidgetsFrom r aux;
-                                            return (s, sl, ws),
-                           RenderWidgets = fn (cfg1, cfg2) (s, sl, ws) => old.tname2.RenderWidgets cfg2 ws,
-                           ReadWidgets = fn (s, sl, ws) =>
+                                            return (s, sl, changed, ws),
+                           RenderWidgets = fn (cfg1, cfg2) (s, sl, changed, ws) => old.tname2.RenderWidgets cfg2 ws,
+                           ReadWidgets = fn (s, sl, changed, ws) =>
                                             slv <- signal sl;
-                                            (wsv, aux) <- old.tname2.ReadWidgets ws;
-                                            return (wsv, (slv, aux))}}
+                                            (wsv, aux, err) <- old.tname2.ReadWidgets ws;
+                                            return (wsv, (slv, aux), err)}}
 
 type custom1 stash t = t
 type custom2 stash t = source string * t
@@ -791,7 +912,7 @@ fun custom [full ::: {Type}]
                                            aux2 <- old.tname.Auxiliary k row;
                                            return (aux1, aux2),
                             Insert = fn r (sto, aux) => old.tname.Insert r aux; Option.app dbchange r.col,
-                            Update = fn r (sto, aux) => old.tname.Update r aux; Option.app dbchange r.col,
+                            Update = fn k r (sto, aux) => old.tname.Update k r aux; Option.app dbchange r.col,
                             Render = fn entry (aux1, aux2) r => <xml>
                               {old.tname.Render entry aux2 r}
                               {case aux1 of
@@ -816,10 +937,10 @@ fun custom [full ::: {Type}]
                                                </xml>,
                             ReadWidgets = fn (s, ws) =>
                                              v <- signal s;
-                                             (wsv, aux) <- old.tname.ReadWidgets ws;
+                                             (wsv, aux, err) <- old.tname.ReadWidgets ws;
                                              return ({col = case v of
                                                                 "" => None
-                                                              | _ => Some (readError v)} ++ wsv, (None, aux))}}
+                                                              | _ => Some (readError v)} ++ wsv, (None, aux), err)}}
 
 datatype action tab key =
          Read of tab
@@ -918,12 +1039,13 @@ functor Make(M : sig
         mayAdd <- authorize (Create which);
         bod <- @@Variant.destrR' [fn _ => unit] [fn p => t1 tables' (dupF p)] [transaction xbody] [tables]
           (fn [p ::_] (maker : tf :: ((Type * {Type} * {{Unit}} * Type * Type * Type) -> Type) -> tf p -> variant (map tf tables)) () r =>
-              rows <- r.List (WHERE TRUE);
+              extra <- r.Extra;
+              rows <- r.ForIndex;
               return <xml>
-                {r.Extra}
+                {extra}
 
                 <table class="bs3-table table-striped">
-                  {List.mapX (fn k => <xml><tr><td><a link={entry (maker [fn p => p.1] k)}>{[@show r.Show k]}</a></td></tr></xml>) rows}
+                  {List.mapX (fn (k, bod) => <xml><tr><td><a link={entry (maker [fn p => p.1] k)}>{bod}</a></td></tr></xml>) rows}
                 </table>
 
                 {if mayAdd then
@@ -947,9 +1069,15 @@ functor Make(M : sig
 
                 <button value="Create" class="btn btn-primary"
                         onclick={fn _ =>
-                                    p <- current (r.ReadWidgets ws);
-                                    rpc (doCreate (maker [fn p => $p.2 * p.6] p));
-                                    redirect (url (index which))}/>
+                                    (p1, p2, err) <- current (r.ReadWidgets ws);
+                                    proceed <- (case err of
+                                                  None => return True
+                                                | Some msg => confirm ("Are you sure you want to proceed with creating that entry?  The following issues were noted:\n\n" ^ msg));
+                                    if proceed then
+                                        rpc (doCreate (maker [fn p => $p.2 * p.6] (p1, p2)));
+                                        redirect (url (index which))
+                                    else
+                                        return ()}/>
               </xml>)
           fl which t;
         tabbed page (Some (weakener which)) (fn _ => return bod)
@@ -1011,9 +1139,15 @@ functor Make(M : sig
                                      <p>
                                        <button class="btn btn-primary"
                                                onclick={fn _ =>
-                                                           row' <- current (r.ReadWidgets ws);
-                                                           rpc (save (maker [fn p => $p.2 * p.6] row'));
-                                                           set est (NotEditing row')}>Save</button>
+                                                           (row1, row2, err) <- current (r.ReadWidgets ws);
+                                                           proceed <- (case err of
+                                                                           None => return True
+                                                                         | Some msg => confirm ("Are you sure you want to proceed with saving that entry?  The following issues were noted:\n\n" ^ msg));
+                                                           if proceed then
+                                                               rpc (save (maker [fn p => p.1 * $p.2 * p.6] (k, row1, row2)));
+                                                               set est (NotEditing (row1, row2))
+                                                           else
+                                                               return ()}>Save</button>
                                        <button class="btn"
                                                onclick={fn _ => set est (NotEditing (row, aux))}>Cancel</button>
                                      </p>
@@ -1029,11 +1163,11 @@ functor Make(M : sig
           {bod}
         </xml>)
 
-    and save (which : variant (map (fn p => $p.2 * p.6) tables)) =
-        @@Variant.destrR' [fn p => $p.2 * p.6] [fn p => t1 tables' (dupF p)] [transaction unit] [tables]
-          (fn [p ::_] (mk : tf :: ((Type * {Type} * {{Unit}} * Type * Type * Type) -> Type) -> tf p -> variant (map tf tables)) (vs : $p.2, aux : p.6) r =>
-              auth (Update (mk [fn p => p.1] (r.KeyOf vs)));
-              r.Update vs aux)
+    and save (which : variant (map (fn p => p.1 * $p.2 * p.6) tables)) =
+        @@Variant.destrR' [fn p => p.1 * $p.2 * p.6] [fn p => t1 tables' (dupF p)] [transaction unit] [tables]
+          (fn [p ::_] (mk : tf :: ((Type * {Type} * {{Unit}} * Type * Type * Type) -> Type) -> tf p -> variant (map tf tables)) (k : p.1, vs : $p.2, aux : p.6) r =>
+              auth (Update (mk [fn p => p.1] k));
+              r.Update k vs aux)
           fl which t
 
     and delete (which : variant (map (fn p => p.1) tables)) =
